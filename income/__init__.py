@@ -1,15 +1,14 @@
 from flask import Flask, jsonify
-import joblib
+from sklearn.ensemble import RandomForestRegressor
 import pandas as pd
 import numpy as np
 import requests
 import json
 
 app = Flask(__name__)
-linear_model = joblib.load('Future_Earnings_model.joblib')
 
 def get_data_from_api():
-    api_url = "https://8990-116-68-110-250.ngrok-free.app/admin_app/weekly_income/"
+    api_url = "http://13.126.57.93:8000/admin_app/weekly_income/"
     try:
         response = requests.get(api_url)
 
@@ -25,7 +24,7 @@ def get_data_from_api():
             df['income_2Weeksback'] = df.groupby('turf__id')['total_income'].shift(2)
             df['income_3Weeksback'] = df.groupby('turf__id')['total_income'].shift(3)
 
-            df.fillna(950, inplace=True)
+            df.fillna(0, inplace=True)
 
             result_df = df[['turf__id', 'end_date', 'income_LastWeek', 'income_2Weeksback', 'income_3Weeksback', 'total_income']]
 
@@ -36,40 +35,61 @@ def get_data_from_api():
     except requests.exceptions.RequestException as e:
         print(f"Error making API request: {e}")
 
-    # Return default values in case of an exception
     return None
+
+def train_models(data):
+    models = {}
+    
+    for turf_id in data['turf__id'].unique():
+        turf_data = data[data['turf__id'] == turf_id].copy()
+        
+        X_turf = turf_data[['income_LastWeek', 'income_2Weeksback', 'income_3Weeksback']]
+        y_turf = turf_data['total_income']
+        
+        model = RandomForestRegressor(n_estimators=100, random_state=42)  
+        model.fit(X_turf, y_turf)
+        
+        models[turf_id] = model
+    
+    return models
+
+
 
 @app.route('/income', methods=['GET', 'POST'])
 def income():
     result_df = get_data_from_api()
 
     if result_df is not None:
+        models = train_models(result_df)
+
         predictions = []
 
-        for turf__id in result_df['turf__id'].unique():
-            turf_data = result_df[result_df['turf__id'] == turf__id]
+        for turf_id in result_df['turf__id'].unique():
+            turf_data = result_df[result_df['turf__id'] == turf_id].copy()
 
             if not turf_data.empty:
                 recent_row = turf_data.iloc[-1]
 
                 try:
                     input_features = [
+                        recent_row['total_income'],
                         recent_row['income_LastWeek'],
-                        recent_row['income_2Weeksback'],
-                        recent_row['income_3Weeksback']
+                        recent_row['income_2Weeksback']
                     ]
 
-                    predicted_income = linear_model.predict([input_features])[0]
-                    rounded_predicted_income = round(predicted_income)
-
+                    model_to_use = models.get(turf_id)
+                    if model_to_use is not None:
+                        predicted_income = model_to_use.predict([input_features])[0]
+                        rounded_predicted_income = round(predicted_income)
+                    else:
+                        rounded_predicted_income = 1000
                 except Exception as e:
-                    print("There was an error during income prediction.")
-                    # Set a default value for prediction
-                    rounded_predicted_income = 2000  # Set your desired default value
+                    print(f"There was an error during income prediction for turf_id {turf_id}: {str(e)}")
+                    rounded_predicted_income = 1000
 
-                predictions.append({"turf__id": turf__id, "predicted_income": rounded_predicted_income})
+                predictions.append({"turf__id": turf_id, "predicted_income": rounded_predicted_income})
             else:
-                predictions.append({"turf__id": turf__id, "error": "No data found for the specified turf_id"})
+                predictions.append({"turf__id": turf_id, "error": "No data found for the specified turf_id"})
 
         predictions_df = pd.DataFrame(predictions)
 

@@ -1,5 +1,5 @@
 from flask import Flask, jsonify
-import joblib
+from sklearn.ensemble import RandomForestRegressor
 import pandas as pd
 import numpy as np
 import requests
@@ -7,10 +7,9 @@ import json
 
 app = Flask(__name__)
 
-pipeline = joblib.load('Future_Bookings_model.joblib')
 
 def get_booking_data_from_api():
-    api_url = "https://8990-116-68-110-250.ngrok-free.app/admin_app/weekly_income/"  
+    api_url = "http://13.126.57.93:8000/admin_app/weekly_income/"  
     try:
         response = requests.get(api_url)
 
@@ -26,7 +25,7 @@ def get_booking_data_from_api():
             df['booking_2Weeksback'] = df.groupby('turf__id')['total_booking'].shift(2)
             df['booking_3Weeksback'] = df.groupby('turf__id')['total_booking'].shift(3)
 
-            df.fillna(2, inplace=True)
+            df.fillna(0, inplace=True)
 
             book_df = df[['turf__id', 'end_date', 'booking_LastWeek', 'booking_2Weeksback', 'booking_3Weeksback', 'total_booking']]
 
@@ -37,40 +36,62 @@ def get_booking_data_from_api():
     except requests.exceptions.RequestException as e:
         print(f"Error making API request: {e}")
 
-    # Return default values in case of an exception
     return None
+
+def train_models(data):
+    models = {}
+    
+    for turf_id in data['turf__id'].unique():
+        turf_data = data[data['turf__id'] == turf_id].copy()
+        
+        X_turf = turf_data[['booking_LastWeek', 'booking_2Weeksback', 'booking_3Weeksback']]
+        y_turf = turf_data['total_booking']
+        
+        model = RandomForestRegressor(n_estimators=100, random_state=42)  
+        model.fit(X_turf, y_turf)
+        
+        models[turf_id] = model
+    
+    return models
+
+
+
 
 @app.route('/booking', methods=['GET', 'POST'])
 def booking():
     book_df = get_booking_data_from_api()
 
     if book_df is not None:
+        models = train_models(book_df)
+
         predictions = []
 
-        for turf__id in book_df['turf__id'].unique():
-            turf_data = book_df[book_df['turf__id'] == turf__id]
+        for turf_id in book_df['turf__id'].unique():
+            turf_data = book_df[book_df['turf__id'] == turf_id].copy()
 
             if not turf_data.empty:
-                recent_row = turf_data.iloc[-1]  # Get the last row for the current turf__id
+                recent_row = turf_data.iloc[-1]
 
                 try:
                     input_features = [
+                        recent_row['total_booking'],
                         recent_row['booking_LastWeek'],
-                        recent_row['booking_2Weeksback'],
-                        recent_row['booking_3Weeksback']
+                        recent_row['booking_2Weeksback']
                     ]
 
-                    predicted_booking = pipeline.predict([input_features])[0]
-                    rounded_predicted_booking = round(predicted_booking)
-
+                    model_to_use = models.get(turf_id)
+                    if model_to_use is not None:
+                        predicted_booking = model_to_use.predict([input_features])[0]
+                        rounded_predicted_booking = round(predicted_booking)
+                    else:
+                        rounded_predicted_booking = 2
                 except Exception as e:
-                    print(f"There was an error during booking prediction for turf__id {turf__id}: {e}")
-                    # Set a default value for prediction
-                    rounded_predicted_booking = 50  # Set your desired default value
+                    print(f"There was an error during income prediction for turf_id {turf_id}: {str(e)}")
+                    rounded_predicted_booking = 2
 
-                predictions.append({"turf_id": turf__id, "predicted_bookings": rounded_predicted_booking})
+                predictions.append({"turf__id": turf_id, "predicted_booking": rounded_predicted_booking})
             else:
-                predictions.append({"turf_id": turf__id, "error": "No data found for the specified turf_id"})
+                predictions.append({"turf__id": turf_id, "error": "No data found for the specified turf_id"})
 
         predictions_df = pd.DataFrame(predictions)
 
@@ -78,6 +99,7 @@ def booking():
     else:
         print("Error fetching data from the API")
         return jsonify({"error": "Error fetching data from the API"})
+
 
 if __name__ == '__main__':
     app.run(debug=True)
